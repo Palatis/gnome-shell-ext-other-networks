@@ -1,0 +1,8 @@
+{
+  "uuid": "other-networks@palatis.github.io",
+  "name": "Other Networks - Quick Switch",
+  "description": "Adds Quick Settings toggles for NetworkManager macvlan and ipvlan connections.",
+  "gettext-domain": "other-networks@palatis.github.io",
+  "shell-version": ["49", "50"],
+  "url": "https://github.com/Palatis/gnome-shell-ext-other-networks"
+}

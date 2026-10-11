@@ -1,0 +1,40 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the PACKAGE package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: other-networks@palatis.github.io\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-12 02:18+0800\n"
+"PO-Revision-Date: 2026-10-12 02:21+0800\n"
+"Last-Translator: Victor Tseng <palatis@palatis.pro>\n"
+"Language-Team: \n"
+"Language: zh_TW\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Generator: Poedit 3.9\n"
+
+#: extension.js:46
+msgid "Other Networks"
+msgstr "其他網路"
+
+#: extension.js:53
+msgid "Other network connections"
+msgstr "其他網路連線"
+
+#: extension.js:159
+msgid "No macvlan/ipvlan connections"
+msgstr "沒有 macvlan / ipvlan 連線"
+
+#: extension.js:160
+#, javascript-format
+msgid "%d of %d active"
+msgstr "已啟用 %d / %d 個連線"
+
+#: extension.js:173
+msgid "No macvlan/ipvlan connections found"
+msgstr "沒有找到 macvlan / ipvlan 連線"
