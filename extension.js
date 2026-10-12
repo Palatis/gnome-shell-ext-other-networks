@@ -49,31 +49,52 @@ class OtherNetworksMenuToggle extends QuickSettings.QuickMenuToggle {
         });
 
         this._ = message => gettext(extension, message);
-        this._indicatorIcon = indicatorIcon;
         this.menu.setHeader(ICON_NAME, this._('Other network connections'));
         this._disposed = false;
-        // Keep the Quick Settings item hidden until a supported connection is found.
         this.visible = false;
         this._settingChecked = false;
         this._changing = new Set();
-        this._connections = new Map();
+        this._connections = new Map(); // UUID -> {uuid, name, path}
         this._items = new Map();
-        this._refreshing = false;
+        this._connectionProxies = new Map();
+        this._activePaths = new Map(); // UUID -> active connection object path
+
+        this._manager = makeProxy(ROOT_PATH, ROOT_IFACE);
+        this._settings = makeProxy(SETTINGS_PATH, SETTINGS_IFACE);
 
         this.connect('notify::checked', () => {
             if (!this._settingChecked && !this._disposed)
                 this._setAllConnections(this.checked);
         });
 
-        this._pollSource = GLib.timeout_add_seconds(
-            GLib.PRIORITY_DEFAULT,
-            POLL_INTERVAL_SECONDS,
-            () => {
-                this._refresh();
-                return GLib.SOURCE_CONTINUE;
-            },
-        );
-        this._refresh();
+        this._settingsSignalIds = [
+            this._settings.connect('g-signal', (_proxy, _sender, signal, params) => {
+                if (signal === 'NewConnection') {
+                    const [path] = params.deep_unpack();
+                    this._loadConnection(path);
+                } else if (signal === 'ConnectionRemoved') {
+                    const [path] = params.deep_unpack();
+                    this._removeConnection(path);
+                }
+            }),
+        ];
+        this._managerSignalId = this._manager.connect('g-properties-changed',
+            (_proxy, changed) => {
+                if (changed.lookup_value('ActiveConnections', null))
+                    this._refreshActiveConnections();
+            });
+
+        call(this._settings, 'ListConnections', null, (result, error) => {
+            if (this._disposed)
+                return;
+            if (error) {
+                logError(error, 'Other Networks Quick Switch: NetworkManager ListConnections failed');
+                return;
+            }
+            for (const path of result.deep_unpack()[0])
+                this._loadConnection(path);
+            this._refreshActiveConnections();
+        });
     }
 
     _setChecked(value) {
@@ -82,87 +103,135 @@ class OtherNetworksMenuToggle extends QuickSettings.QuickMenuToggle {
         this._settingChecked = false;
     }
 
-    _runNmcli(args, callback) {
-        let proc;
+    _loadConnection(path) {
+        if (this._disposed || [...this._connectionProxies.values()].some(entry => entry.path === path))
+            return;
+
+        let proxy;
         try {
-            proc = Gio.Subprocess.new(
-                ['nmcli', ...args],
-                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
-            );
+            proxy = makeProxy(path, CONNECTION_IFACE);
         } catch (e) {
-            callback(false, '', e.message);
+            logError(e, `Other Networks Quick Switch: unable to open connection ${path}`);
             return;
         }
 
-        proc.communicate_utf8_async(null, null, (p, result) => {
-            try {
-                const [, stdout, stderr] = p.communicate_utf8_finish(result);
-                callback(p.get_successful(), stdout ?? '', stderr ?? '');
-            } catch (e) {
-                callback(false, '', e.message);
+        const entry = {path, proxy, uuid: null};
+        this._connectionProxies.set(path, entry);
+        entry.signalId = proxy.connect('g-signal', (_p, _sender, signal) => {
+            if (signal === 'Updated')
+                this._readConnection(entry);
+            else if (signal === 'Removed')
+                this._removeConnection(path);
+        });
+        this._readConnection(entry);
+    }
+
+    _readConnection(entry) {
+        call(entry.proxy, 'GetSettings', null, (result, error) => {
+            if (this._disposed || !this._connectionProxies.has(entry.path))
+                return;
+            if (error) {
+                logError(error, `Other Networks Quick Switch: unable to read connection ${entry.path}`);
+                return;
             }
+
+            const profile = unpackSettings(result);
+            const previousUuid = entry.uuid;
+            entry.uuid = profile.uuid;
+
+            if (previousUuid && previousUuid !== profile.uuid)
+                this._connections.delete(previousUuid);
+
+            if (SUPPORTED_TYPES.has(profile.type) && profile.uuid) {
+                this._connections.set(profile.uuid, {
+                    uuid: profile.uuid,
+                    name: profile.name,
+                    path: entry.path,
+                });
+            } else if (profile.uuid) {
+                this._connections.delete(profile.uuid);
+            }
+
+            // Active-connection matching needs the profile UUID, which is only
+            // known now, so re-evaluate the active set (this also updates the menu).
+            this._refreshActiveConnections();
         });
     }
 
-    _refresh() {
-        if (this._disposed || this._refreshing)
+    _removeConnection(path) {
+        const entry = this._connectionProxies.get(path);
+        if (!entry)
             return;
-        this._refreshing = true;
-
-        this._runNmcli(
-            ['-t', '-f', 'UUID,NAME,TYPE', 'connection', 'show'],
-            (ok, stdout, stderr) => {
-                if (this._disposed)
-                    return;
-                if (!ok) {
-                    this._refreshing = false;
-                    logError(new Error(`Other Networks Quick Switch: unable to list connections: ${stderr.trim()}`));
-                    return;
-                }
-
-                const found = new Map();
-                for (const line of stdout.split('\n')) {
-                    if (!line)
-                        continue;
-                    const fields = splitTerseLine(line);
-                    if (fields.length < 3 || !SUPPORTED_TYPES.has(fields[2]))
-                        continue;
-                    found.set(fields[0], {uuid: fields[0], name: fields[1] || fields[0]});
-                }
-                this._connections = found;
-                // Hide the toggle entirely when no macvlan/ipvlan profiles exist.
-                this.visible = found.size > 0;
-                if (this._indicatorIcon)
-                    this._indicatorIcon.visible = found.size > 0;
-                this._syncActiveState();
-            },
-        );
+        if (entry.signalId)
+            entry.proxy.disconnect(entry.signalId);
+        this._connectionProxies.delete(path);
+        if (entry.uuid)
+            this._connections.delete(entry.uuid);
+        this._updateVisibilityAndMenu();
     }
 
-    _syncActiveState() {
-        this._runNmcli(
-            ['-t', '-f', 'UUID', 'connection', 'show', '--active'],
-            (ok, stdout, stderr) => {
-                if (this._disposed)
-                    return;
-                this._refreshing = false;
-                if (!ok) {
-                    logError(new Error(`Other Networks Quick Switch: unable to query active connections: ${stderr.trim()}`));
-                    return;
-                }
+    _refreshActiveConnections() {
+        if (this._disposed)
+            return;
+        const value = this._manager.get_cached_property('ActiveConnections');
+        const paths = value ? value.deep_unpack() : [];
+        const active = new Map();
+        let remaining = paths.length;
 
-                const active = new Set(stdout.split('\n').map(line => line.trim()).filter(Boolean));
-                this._rebuildMenu(active);
-                const anyActive = [...this._connections.keys()].some(uuid => active.has(uuid));
-                this._setChecked(anyActive);
-                this.subtitle = this._connections.size === 0
-                    ? this._('No macvlan/ipvlan connections')
-                    : this._('%d of %d active').replace('%d', String([...this._connections.keys()].filter(uuid => active.has(uuid)).length)).replace('%d', String(this._connections.size));
-            },
-        );
+        if (remaining === 0) {
+            this._activePaths = active;
+            this._updateVisibilityAndMenu();
+            return;
+        }
+
+        for (const path of paths) {
+            let proxy;
+            try {
+                proxy = makeProxy(path, ACTIVE_IFACE);
+            } catch (e) {
+                if (--remaining === 0) {
+                    this._activePaths = active;
+                    this._updateVisibilityAndMenu();
+                }
+                continue;
+            }
+
+            const connectionValue = proxy.get_cached_property('Connection');
+            const profilePath = connectionValue?.deep_unpack();
+            if (!profilePath) {
+                if (--remaining === 0) {
+                    this._activePaths = active;
+                    this._updateVisibilityAndMenu();
+                }
+                continue;
+            }
+
+            const profileEntry = [...this._connectionProxies.values()]
+                .find(entry => entry.path === profilePath);
+            if (profileEntry?.uuid)
+                active.set(profileEntry.uuid, path);
+
+            if (--remaining === 0) {
+                this._activePaths = active;
+                this._updateVisibilityAndMenu();
+            }
+        }
     }
 
-    _rebuildMenu(active) {
+    _updateVisibilityAndMenu() {
+        if (this._disposed)
+            return;
+        this.visible = this._connections.size > 0;
+        this._rebuildMenu();
+        const activeCount = [...this._connections.keys()]
+            .filter(uuid => this._activePaths.has(uuid)).length;
+        this._setChecked(activeCount > 0);
+        this.subtitle = this._('%d of %d active')
+                .replace('%d', String(activeCount))
+                .replace('%d', String(this._connections.size));
+    }
+
+    _rebuildMenu() {
         this.menu.removeAll();
         this._items.clear();
 
@@ -177,7 +246,8 @@ class OtherNetworksMenuToggle extends QuickSettings.QuickMenuToggle {
         }
 
         for (const connection of connections) {
-            const item = new PopupMenu.PopupSwitchMenuItem(connection.name, active.has(connection.uuid));
+            const item = new PopupMenu.PopupSwitchMenuItem(
+                connection.name, this._activePaths.has(connection.uuid));
             item.connect('toggled', (_item, state) => {
                 if (!this._disposed && !this._changing.has(connection.uuid))
                     this._setConnection(connection, state);
@@ -193,16 +263,13 @@ class OtherNetworksMenuToggle extends QuickSettings.QuickMenuToggle {
             this._setChecked(false);
             return;
         }
-        // Run operations serially to avoid racing NetworkManager state changes.
-        const next = connections.filter(connection => !this._changing.has(connection.uuid));
+
+        const next = connections.filter(c => !this._changing.has(c.uuid));
         let index = 0;
         const runNext = () => {
-            if (this._disposed || index >= next.length) {
-                this._refresh();
+            if (this._disposed || index >= next.length)
                 return;
-            }
-            const connection = next[index++];
-            this._setConnection(connection, enable, runNext);
+            this._setConnection(next[index++], enable, runNext);
         };
         runNext();
     }
@@ -213,79 +280,89 @@ class OtherNetworksMenuToggle extends QuickSettings.QuickMenuToggle {
             return;
         }
         this._changing.add(connection.uuid);
-        const args = enable
-            ? ['connection', 'up', 'uuid', connection.uuid]
-            : ['connection', 'down', 'uuid', connection.uuid];
 
-        this._runNmcli(args, (ok, stdout, stderr) => {
+        if (enable) {
+            call(this._manager, 'ActivateConnection',
+                new GLib.Variant('(ooo)', [connection.path, '/', '/']),
+                (result, error) => {
+                    this._changing.delete(connection.uuid);
+                    if (this._disposed)
+                        return;
+                    if (error)
+                        logError(error, `Other Networks Quick Switch: failed to activate ${connection.name}`);
+                    this._refreshActiveConnections();
+                    done?.();
+                });
+            return;
+        }
+
+        const activePath = this._activePaths.get(connection.uuid);
+        if (!activePath) {
             this._changing.delete(connection.uuid);
-            if (this._disposed)
-                return;
-            if (!ok) {
-                logError(new Error(
-                    `Other Networks Quick Switch: nmcli ${args.join(' ')} failed: ${stderr.trim() || stdout.trim() || 'unknown error'}`,
-                ));
-            }
-            if (done)
-                done();
-            else
-                this._refresh();
-        });
+            done?.();
+            return;
+        }
+
+        call(this._manager, 'DeactivateConnection',
+            new GLib.Variant('(o)', [activePath]),
+            (_result, error) => {
+                this._changing.delete(connection.uuid);
+                if (this._disposed)
+                    return;
+                if (error)
+                    logError(error, `Other Networks Quick Switch: failed to deactivate ${connection.name}`);
+                this._refreshActiveConnections();
+                done?.();
+            });
     }
 
     destroy() {
-        if (this._pollSource) {
-            GLib.Source.remove(this._pollSource);
-            this._pollSource = 0;
-        }
         this._disposed = true;
+        if (this._settingsSignalIds) {
+            for (const id of this._settingsSignalIds)
+                this._settings.disconnect(id);
+        }
+        if (this._managerSignalId)
+            this._manager.disconnect(this._managerSignalId);
+        for (const entry of this._connectionProxies.values()) {
+            if (entry.signalId)
+                entry.proxy.disconnect(entry.signalId);
+        }
+        this._connectionProxies.clear();
         super.destroy();
     }
 });
 
 export default class MacvlanQuickSwitchExtension extends Extension {
     enable() {
-        this._indicator = new QuickSettings.SystemIndicator();
-        this._panelIcon = this._indicator._addIndicator();
-        this._panelIcon.icon_name = ICON_NAME;
-        this._panelIcon.visible = false;
-        this._toggle = new OtherNetworksMenuToggle(this, this._panelIcon);
+        this._toggle = new OtherNetworksMenuToggle(this);
+        this._indicator = new QuickSettings.SystemIndicator();        
         this._indicator.quickSettingsItems.push(this._toggle);
 
         const quickSettings = Main.panel.statusArea.quickSettings;
         quickSettings.addExternalIndicator(this._indicator);
 
-        // Best-effort placement immediately after GNOME's built-in network tile.
-        // The grid and built-in tile references are private Shell APIs and may vary.
+        // Best-effort placement immediately after GNOME's built-in wired tile.
         try {
             const wiredToggle = quickSettings._network?._wiredToggle;
             const grid = wiredToggle?.get_parent();
-            if (typeof grid.set_child_at_index === 'function') {
-                const children = grid?.get_children?.() ?? [];
+            if (grid && typeof grid.set_child_at_index === 'function') {
+                const children = grid.get_children?.() ?? [];
                 const wiredIndex = children.indexOf(wiredToggle);
                 const ownIndex = children.indexOf(this._toggle);
-                if (wiredIndex >= 0 && ownIndex >= 0) {
-                    log(`wiredIndex = {wiredIndex}, ownIndex = {ownIndex}`);    
+                if (wiredIndex >= 0 && ownIndex >= 0)
                     grid.set_child_at_index(this._toggle, wiredIndex + 1);
-                }
             }
         } catch (e) {
-            // Keep GNOME's default placement if reordering is unsupported.
             log(`Other Networks Quick Switch: using default Quick Settings order: ${e.message}`);
         }
     }
 
     disable() {
-        const quickSettings = Main.panel.statusArea.quickSettings;
-        if (this._quickSettings && this._indicator) {
-            this._quickSettings.removeExternalIndicator(this._indicator);
-        }
-
         this._toggle?.destroy();
         this._toggle = null;
 
         this._indicator?.destroy();
         this._indicator = null;
-        this._panelIcon = null;
     }
 }
