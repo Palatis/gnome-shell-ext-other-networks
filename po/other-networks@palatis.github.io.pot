@@ -17,23 +17,19 @@ msgstr ""
 "Content-Type: text/plain; charset=CHARSET\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-#: extension.js:46
+#: extension.js:69
 msgid "Other Networks"
 msgstr ""
 
-#: extension.js:53
+#: extension.js:75
 msgid "Other network connections"
 msgstr ""
 
-#: extension.js:159
-msgid "No macvlan/ipvlan connections"
-msgstr ""
-
-#: extension.js:160
+#: extension.js:252
 #, javascript-format
 msgid "%d of %d active"
 msgstr ""
 
-#: extension.js:173
+#: extension.js:265
 msgid "No macvlan/ipvlan connections found"
 msgstr ""

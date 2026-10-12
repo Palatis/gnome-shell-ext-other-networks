@@ -18,23 +18,19 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "X-Generator: Poedit 3.9\n"
 
-#: extension.js:46
+#: extension.js:69
 msgid "Other Networks"
 msgstr "其他網路"
 
-#: extension.js:53
+#: extension.js:75
 msgid "Other network connections"
 msgstr "其他網路連線"
 
-#: extension.js:159
-msgid "No macvlan/ipvlan connections"
-msgstr "沒有 macvlan / ipvlan 連線"
-
-#: extension.js:160
+#: extension.js:252
 #, javascript-format
 msgid "%d of %d active"
 msgstr "已啟用 %d / %d 個連線"
 
-#: extension.js:173
+#: extension.js:265
 msgid "No macvlan/ipvlan connections found"
 msgstr "沒有找到 macvlan / ipvlan 連線"
