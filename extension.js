@@ -7,41 +7,64 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const POLL_INTERVAL_SECONDS = 5;
+const BUS_NAME = 'org.freedesktop.NetworkManager';
+const ROOT_PATH = '/org/freedesktop/NetworkManager';
+const ROOT_IFACE = 'org.freedesktop.NetworkManager';
+const SETTINGS_PATH = '/org/freedesktop/NetworkManager/Settings';
+const SETTINGS_IFACE = 'org.freedesktop.NetworkManager.Settings';
+const CONNECTION_IFACE = 'org.freedesktop.NetworkManager.Settings.Connection';
+const ACTIVE_IFACE = 'org.freedesktop.NetworkManager.Connection.Active';
 const ICON_NAME = 'network-wired-symbolic';
 const SUPPORTED_TYPES = new Set(['macvlan', 'ipvlan']);
 
 const gettext = (extension, message) => extension.gettext(message);
 
-// nmcli's terse format escapes separators inside field values with backslashes.
-function splitTerseLine(line) {
-    const fields = [];
-    let field = '';
-    let escaped = false;
+function makeProxy(path, iface) {
+    return Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SYSTEM,
+        Gio.DBusProxyFlags.NONE,
+        null,
+        BUS_NAME,
+        path,
+        iface,
+        null,
+    );
+}
 
-    for (const char of line) {
-        if (escaped) {
-            field += char;
-            escaped = false;
-        } else if (char === '\\') {
-            escaped = true;
-        } else if (char === ':') {
-            fields.push(field);
-            field = '';
-        } else {
-            field += char;
-        }
-    }
+function call(proxy, method, parameters, callback) {
+    proxy.call(
+        method,
+        parameters,
+        Gio.DBusCallFlags.NONE,
+        -1,
+        null,
+        (source, result) => {
+            try {
+                callback(source.call_finish(result), null);
+            } catch (e) {
+                callback(null, e);
+            }
+        },
+    );
+}
 
-    if (escaped)
-        field += '\\';
-    fields.push(field);
-    return fields;
+function unpackSettings(variant) {
+    // GetSettings returns (a{sa{sv}}). deep_unpack() leaves the inner 'v'
+    // values as GLib.Variant objects, so `type`/`uuid` would not be strings
+    // (and a Variant used as a Map key never matches). recursiveUnpack()
+    // unwraps those variants too.
+    const [settings] = variant.recursiveUnpack();
+    const connection = settings.connection ?? {};
+    return {
+        uuid: connection.uuid,
+        name: connection.id || connection.uuid,
+        type: connection.type,
+    };
 }
 
 const OtherNetworksMenuToggle = GObject.registerClass(
 class OtherNetworksMenuToggle extends QuickSettings.QuickMenuToggle {
-    _init(extension, indicatorIcon) {
+    _init(extension) {
         super._init({
             title: gettext(extension, 'Other Networks'),
             iconName: ICON_NAME,
